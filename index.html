@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Chat Room</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        #messageLog { height: 300px; overflow-y: scroll; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; }
+        input, button { margin: 5px 0; }
+        .system { color: #888; }
+        .user { color: #000; }
+        .you { color: #00f; }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Chat Room</h1>
+    <div>
+        <input type="text" id="roomName" placeholder="Room name">
+        <button onclick="joinRoom()">Join Room</button>
+        <button onclick="leaveRoom()">Leave Room</button>
+    </div>
+    <div id="messageLog"></div>
+    <input type="text" id="messageInput" placeholder="Type a message">
+    <button onclick="sendMessage()">Send</button>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:8080/ws');
+        const messageLog = document.getElementById('messageLog');
+        const messageInput = document.getElementById('messageInput');
+        const roomNameInput = document.getElementById('roomName');
+        let currentRoom = '';
+
+        socket.onopen = function(event) {
+            logMessage('System', 'Connected to WebSocket server');
+        };
+
+        socket.onmessage = function(event) {
+            const [sender, message] = event.data.split(': ', 2);
+            logMessage(sender, message);
+        };
+
+        socket.onclose = function(event) {
+            logMessage('System', 'Disconnected from WebSocket server');
+        };
+
+        socket.onerror = function(error) {
+            logMessage('System', 'WebSocket Error: ' + error.message);
+        };
+
+        function joinRoom() {
+            const roomName = roomNameInput.value;
+            if (roomName) {
+                socket.send('join:' + roomName);
+                currentRoom = roomName;
+            }
+        }
+
+        function leaveRoom() {
+            if (currentRoom) {
+                socket.send('leave:' + currentRoom);
+                currentRoom = '';
+            }
+        }
+
+        function sendMessage() {
+            const message = messageInput.value;
+            if (message && currentRoom) {
+                socket.send('message:' + message);
+                messageInput.value = '';
+            }
+        }
+
+        function logMessage(sender, message) {
+            const messageElement = document.createElement('p');
+            messageElement.className = sender.toLowerCase();
+            messageElement.innerHTML = `<strong>${sender}:</strong> ${message}`;
+            messageLog.appendChild(messageElement);
+            messageLog.scrollTop = messageLog.scrollHeight;
+        }
+
+        messageInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
