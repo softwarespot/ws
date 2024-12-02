@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>WebSocket Chat Room</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+
+            #msgs-log {
+                height: 300px;
+                overflow-y: scroll;
+                border: 1px solid #ccc;
+                padding: 10px;
+                margin-bottom: 10px;
+            }
+
+            input,
+            button {
+                margin: 5px 0;
+            }
+
+            .system {
+                color: #888;
+            }
+
+            .user {
+                color: #000;
+            }
+
+            .you {
+                color: #00f;
+            }
+        </style>
+    </head>
+
+    <body>
+        <h1>WebSocket Chat Room</h1>
+        <div>
+            <label for="room-name">Room name:</label>
+            <input type="text" id="room-name" placeholder="Room name" />
+            <button id="join-btn" disabled>Join Room</button>
+            <button id="leave-btn" disabled>Leave Room</button>
+        </div>
+        <div id="msgs-log"></div>
+        <input id="msg-input" type="text" placeholder="Type a message" disabled />
+        <button id="msg-btn" disabled>Send</button>
+
+        <script>
+            const LEVEL_ERROR = 1;
+            const LEVEL_DEBUG = 2;
+
+            // URL: https://github.com/socketio/socket.io/blob/main/examples/basic-websocket-client/src/index.js
+            class Socket {
+                subscribers = new Map();
+                #emit(event, ...args) {
+                    if (!this.subscribers.has(event)) {
+                        return;
+                    }
+
+                    const fns = this.subscribers.get(event);
+                    for (const fn of fns) {
+                        fn(...args);
+                    }
+                }
+                #on(event, fn) {
+                    if (!this.subscribers.has(event)) {
+                        this.subscribers.set(event, [fn]);
+                        return;
+                    }
+
+                    const fns = this.subscribers.get(event);
+                    fns.push(fn);
+                }
+
+                #ws = undefined;
+                #id = undefined;
+
+                #ackFns = new Map();
+                #ackId = 0;
+
+                #level = LEVEL_DEBUG;
+
+                constructor(url) {
+                    this.#ws = new WebSocket(url);
+                    this.#ws.onopen = (evt) => {
+                        this.debug('ON_OPEN', evt);
+                    };
+                    this.#ws.onerror = (evt) => {
+                        this.debug('ON_ERROR', evt);
+                    };
+                    this.#ws.onclose = (evt) => {
+                        this.debug('ON_CLOSE', evt);
+                        this.#onDisconnect('connection lost to the server');
+                    };
+                    this.#ws.onmessage = (evt) => {
+                        this.debug('ON_MESSAGE', evt);
+                        const packet = JSON.parse(evt.data);
+                        this.#onPacketReceived(packet);
+                    };
+                }
+
+                #onPacketReceived(packet) {
+                    switch (packet.type) {
+                        case 'connect':
+                            this.#onConnect(packet.data.id);
+                            break;
+                        case 'disconnect':
+                            this.#onDisconnect(packet.data.reason);
+                            break;
+                        case 'ack-from-client':
+                            const ackFn = (...args) => {
+                                this.#emitAckFromClient(packet.data.id, ...args);
+                            };
+                            packet.data.args.push(ackFn);
+                            this.#emit(packet.data.event, ...packet.data.args);
+                            break;
+                        case 'ack-from-server':
+                            if (this.#ackFns.has(packet.data.id)) {
+                                const ackFn = this.#ackFns.get(packet.data.id);
+                                ackFn(...packet.data.args);
+                                this.#ackFns.delete(packet.data.id);
+                            }
+                            break;
+                        case 'event':
+                            this.#emit(packet.data.event, ...packet.data.args);
+                            break;
+                        default:
+                            this.debug('Unknown packet type:', packet);
+                            break;
+                    }
+                }
+
+                #onConnect(id) {
+                    this.#id = id;
+
+                    this.#emit('connect', id);
+                }
+
+                #onDisconnect(reason) {
+                    if (this.#ws) {
+                        this.#ws.onclose = undefined;
+                        this.#ws.close();
+                    }
+
+                    this.#emit('disconnect', reason);
+
+                    this.#id = undefined;
+                    this.#ackFns.clear();
+                    this.#ackId = 0;
+                }
+
+                id() {
+                    return this.#id;
+                }
+
+                connected() {
+                    return this.#ws.readyState === WebSocket.OPEN;
+                }
+
+                emit(event, ...args) {
+                    if (!this.connected()) {
+                        return;
+                    }
+
+                    const ackFn = args.at(-1);
+                    if (typeof ackFn === 'function') {
+                        const ackId = this.#ackId;
+                        this.#ackId += 1;
+                        this.#ackFns.set(ackId, ackFn);
+
+                        // Remove the "ack" function
+                        args.pop();
+
+                        const packet = JSON.stringify({
+                            type: 'ack-from-server',
+                            data: {
+                                event,
+                                id: ackId,
+                                args: args,
+                            },
+                        });
+                        this.#ws.send(packet);
+                        return;
+                    }
+
+                    const packet = JSON.stringify({
+                        type: 'event',
+                        data: {
+                            event,
+                            args: args,
+                        },
+                    });
+                    this.#ws.send(packet);
+                }
+
+                #emitAckFromClient(id, ...args) {
+                    const packet = JSON.stringify({
+                        type: 'ack-from-client',
+                        data: {
+                            id: id,
+                            args: args,
+                        },
+                    });
+                    this.#ws.send(packet);
+                }
+
+                on(event, fn) {
+                    this.#on(event, fn);
+                }
+
+                debug(...args) {
+                    if (this.#level <= LEVEL_DEBUG) {
+                        console.log(...args);
+                    }
+                }
+
+                setLogLevel(level) {
+                    this.#level = level;
+                }
+            }
+
+            function io(url, fn) {
+                const socket = new Socket(url);
+                fn(socket);
+            }
+        </script>
+        <script>
+            const state = {
+                currRoom: undefined,
+            };
+
+            const roomNameEl = document.getElementById('room-name');
+            const joinBtnEl = document.getElementById('join-btn');
+            const leaveBtnEl = document.getElementById('leave-btn');
+            const msgLogEl = document.getElementById('msgs-log');
+            const msgInputEl = document.getElementById('msg-input');
+            const msgBtnEl = document.getElementById('msg-btn');
+
+            io('ws://localhost:8080/ws', (socket) => {
+                function ping() {
+                    const startMs = Date.now();
+                    socket.emit('ping', () => {
+                        const nowMs = Date.now();
+                        console.log(`pong: ${nowMs - startMs}ms`);
+                    });
+                    setTimeout(ping, 2500);
+                }
+
+                socket.on('connect', (...args) => {
+                    console.log('Connected for ID:', socket.id());
+
+                    joinBtnEl.disabled = false;
+
+                    socket.emit('from-client', (...args) => {
+                        console.log('received from server', args);
+                    });
+                    socket.on('from-server', (fn) => {
+                        fn();
+                    });
+
+                    ping();
+                });
+                socket.on('disconnect', (reason) => {
+                    console.log('Disconnected:', reason);
+
+                    joinBtnEl.disabled = true;
+                    leaveBtnEl.disabled = true;
+                    msgInputEl.disabled = true;
+                    msgBtnEl.disabled = true;
+                });
+
+                function joinRoom() {
+                    const name = roomNameEl.value.trim();
+                    if (name === '') {
+                        alert('Please enter a room name.');
+                        return;
+                    }
+
+                    state.currRoom = name;
+                    joinBtnEl.disabled = true;
+                    leaveBtnEl.disabled = false;
+                    msgInputEl.disabled = false;
+                    msgBtnEl.disabled = false;
+
+                    socket.emit('join', name);
+                }
+
+                joinBtnEl.addEventListener('click', () => {
+                    joinRoom();
+                });
+
+                function leaveRoom() {
+                    state.currRoom = undefined;
+                    leaveBtnEl.disabled = true;
+                    joinBtnEl.disabled = false;
+
+                    socket.emit('leave', roomName);
+                }
+
+                leaveBtnEl.addEventListener('click', () => {
+                    leaveRoom();
+                });
+
+                function sendMessage() {
+                    const msg = msgInputEl.value.trim();
+                    if (!msg) {
+                        alert('Please enter a message');
+                        return;
+                    }
+
+                    msgInputEl.value = '';
+                    socket.emit('message', msg);
+                }
+
+                msgBtnEl.addEventListener('click', () => {
+                    sendMessage();
+                });
+
+                msgInputEl.addEventListener('keypress', ({ key }) => {
+                    if (key === 'Enter') {
+                        sendMessage();
+                    }
+                });
+
+                function logMessage(sender, msg) {
+                    const msgEl = document.createElement('p');
+                    msgEl.classList.add(sender.toLowerCase());
+                    msgEl.innerHTML = `<strong>${sender}:</strong> ${msg}`;
+                    msgLogEl.appendChild(msgEl);
+                    msgLogEl.scrollTop = msgLogEl.scrollHeight;
+                }
+
+                socket.on('message', (sender, msg) => {
+                    logMessage(sender, msg);
+                });
+            });
+        </script>
+    </body>
+</html>
